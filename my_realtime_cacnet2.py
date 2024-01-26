@@ -4,24 +4,23 @@ Created on Fri Jan 19 14:39:42 2024
 
 @author: shingo
 
-
-
 """
+# 開発用のダミーフラグ
+DUMMY = True
+
 import sys
 import math
 import types
 import cv2
 import numpy as np
 import torch
-import torchvision.transforms as transforms
-from config_classification import cfg
-from my_CACNet import MyCACNet
 from PIL import Image
 from cac_software_uitl import DrawTool
-from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
-# import torchvision.transforms as transforms
-# from config_classification import cfg
-# from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
+if not DUMMY:
+    import torchvision.transforms as transforms
+    from config_classification import cfg
+    from my_CACNet import MyCACNet
+    from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
 
 
 #カメラの取り込み(HDMI)指定
@@ -59,12 +58,13 @@ else:
     DEVICE = torch.device('cpu')
 
 
-# CACNet
-TRANS = transforms.Compose([
-    transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
-])
+# CACNet 前処理
+if not DUMMY:
+    TRANS = transforms.Compose([
+        transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
+    ])
 
 # cv2.waitKey 用番号
 ENTER = 13
@@ -93,14 +93,13 @@ def main():
     
     
     # CACNet 準備
-    weight_file = "D:/Eriko/CACNet-Pytorch/experiments/231222_loss_bonus_4/checkpoints/best-FCDB_disp.pth"
-    model = MyCACNet(loadweights=False, bonus_pos=4)
-    # if GPU:
-    #     model.load_state_dict(torch.load(weight_file, map_location="cuda:0"))
-    # else:
-    #     model.load_state_dict(torch.load(weight_file, map_location=torch.device('cpu')))
-    model.load_state_dict(torch.load(weight_file, map_location=DEVICE))
-    model = model.to(DEVICE).eval()
+    if not DUMMY:
+        weight_file = "D:/Eriko/CACNet-Pytorch/experiments/231222_loss_bonus_4/checkpoints/best-FCDB_disp.pth"
+        model = MyCACNet(loadweights=False, bonus_pos=4)
+        model.load_state_dict(torch.load(weight_file, map_location=DEVICE))
+        model = model.to(DEVICE).eval()
+    else:
+        model = DummyNet()
     
     # mode
     mode = 'idling'  # idling / adjust
@@ -182,28 +181,36 @@ def main():
 
 def get_cropping_rect( model, img ):
 
-    # CACNet
-    # aspect比
-    img_h, img_w= img.shape[:2]
-    aspect = img_h / img_w
-    aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
-    aspect = torch.Tensor([[aspect]]).to(DEVICE)
-    
-    # CACNet用入力データに変換
-    input_image = Image.fromarray(img)
-    input_image = TRANS( input_image )
-    input_image = input_image.unsqueeze(dim=0).to(DEVICE)
-    
-    # MyCACNet に入力
-    logits,kcm,box = model(input_image , aspect )
-    
-    # 切り出し領域の計算
-    box = box.detach().cpu()
-    x1, y1, x2, y2 = box[0].tolist()
-    x1 *= img_w / cfg.image_size[1]
-    x2 *= img_w / cfg.image_size[1]
-    y1 *= img_h / cfg.image_size[0]
-    y2 *= img_h / cfg.image_size[0]
+    if DUMMY:
+        rate = 0.6
+        x1 = PRCS_W * (1-rate)/2
+        x2 = PRCS_W * (1+rate)/2
+        y1 = PRCS_H * (1-rate)/2
+        y2 = PRCS_H * (1+rate)/2
+
+    else:
+        # CACNet
+        # aspect比
+        img_h, img_w= img.shape[:2]
+        aspect = img_h / img_w
+        aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
+        aspect = torch.Tensor([[aspect]]).to(DEVICE)
+        
+        # CACNet用入力データに変換
+        input_image = Image.fromarray(img)
+        input_image = TRANS( input_image )
+        input_image = input_image.unsqueeze(dim=0).to(DEVICE)
+        
+        # MyCACNet に入力
+        logits,kcm,box = model(input_image , aspect )
+        
+        # 切り出し領域の計算
+        box = box.detach().cpu()
+        x1, y1, x2, y2 = box[0].tolist()
+        x1 *= img_w / cfg.image_size[1]
+        x2 *= img_w / cfg.image_size[1]
+        y1 *= img_h / cfg.image_size[0]
+        y2 *= img_h / cfg.image_size[0]
 
     # 終了
     crop_rect = [(x1,y1), (x1,y2), (x2,y2), (x2,y1)]
@@ -222,9 +229,11 @@ def homography_matrix( kp1, des1, kp2, des2 ):
 
     '''
     
+    # キーポイントが取れていないときは終了
     if kp1 is None or des1 is None or kp2 is None or des2 is None:
         return None
     
+    # キーポイントが少なすぎる場合は終了
     if len(kp1) < 5 or len(kp2) <5 :
         return None
     
@@ -514,6 +523,9 @@ def match_zoom( zoom_dif ):
     res = abs(zoom_dif) < TH_ZOOM
     return res
 
+# ダミーネットワーク
+class DummyNet:
+    pass
 
 if __name__ == '__main__':
     main()
