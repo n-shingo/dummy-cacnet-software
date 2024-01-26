@@ -12,8 +12,13 @@ import math
 import types
 import cv2
 import numpy as np
+import torch
+import torchvision.transforms as transforms
+from config_classification import cfg
+from my_CACNet import MyCACNet
 from PIL import Image
 from cac_software_uitl import DrawTool
+from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
 # import torchvision.transforms as transforms
 # from config_classification import cfg
 # from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
@@ -45,13 +50,21 @@ TH_DIRECT = 0.02
 TH_ANGLE = 1.0
 TH_ZOOM = 0.03
 
+
+# GPU or CPU
+GPU = True
+if GPU:
+    DEVICE = torch.device('cuda:0')
+else:
+    DEVICE = torch.device('cpu')
+
+
 # CACNet
-# DEVICE = torch.device('cuda:0')
-# TRANS = transforms.Compose([
-#     transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
-#     transforms.ToTensor(),
-#     transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
-# ])
+TRANS = transforms.Compose([
+    transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
+])
 
 # cv2.waitKey 用番号
 ENTER = 13
@@ -79,8 +92,15 @@ def main():
     print( "処理画像サイズ: ( {0}, {1} )".format(PRCS_W, PRCS_H))
     
     
-    # ネットワーク作成
-    model = DummyNet()
+    # CACNet 準備
+    weight_file = "D:/Eriko/CACNet-Pytorch/experiments/231222_loss_bonus_4/checkpoints/best-FCDB_disp.pth"
+    model = MyCACNet(loadweights=False, bonus_pos=4)
+    # if GPU:
+    #     model.load_state_dict(torch.load(weight_file, map_location="cuda:0"))
+    # else:
+    #     model.load_state_dict(torch.load(weight_file, map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load(weight_file, map_location=DEVICE))
+    model = model.to(DEVICE).eval()
     
     # mode
     mode = 'idling'  # idling / adjust
@@ -161,37 +181,29 @@ def main():
 
 
 def get_cropping_rect( model, img ):
-    
-    # ダミー
-    if isinstance(model, DummyNet ):
-        rate = 0.6
-        x1 = PRCS_W * (1-rate)/2
-        x2 = PRCS_W * (1+rate)/2
-        y1 = PRCS_H * (1-rate)/2
-        y2 = PRCS_H * (1+rate)/2
 
     # CACNet
-    # # aspect比
-    # img_h, img_w= img.shape[:2]
-    # aspect = img_h / img_w
-    # aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
-    # aspect = torch.Tensor([[aspect]]).to(DEVICE)
+    # aspect比
+    img_h, img_w= img.shape[:2]
+    aspect = img_h / img_w
+    aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
+    aspect = torch.Tensor([[aspect]]).to(DEVICE)
     
-    # # CACNet用入力データに変換
-    # input_image = Image.fromarray(img)
-    # input_image = TRANS( img )
-    # input_image = img.unsqueeze(dim=0).to(DEVICE)
+    # CACNet用入力データに変換
+    input_image = Image.fromarray(img)
+    input_image = TRANS( input_image )
+    input_image = input_image.unsqueeze(dim=0).to(DEVICE)
     
-    # # MyCACNet に入力
-    # logits,kcm,box = model(input_image , aspect )
+    # MyCACNet に入力
+    logits,kcm,box = model(input_image , aspect )
     
-    # # 切り出し領域の計算
-    # box = box.detach().cpu()
-    # x1, y1, x2, y2 = box[0].tolist()
-    # x1 *= img_w / cfg.image_size[1]
-    # x2 *= img_w / cfg.image_size[1]
-    # y1 *= img_h / cfg.image_size[0]
-    # y2 *= img_h / cfg.image_size[0]
+    # 切り出し領域の計算
+    box = box.detach().cpu()
+    x1, y1, x2, y2 = box[0].tolist()
+    x1 *= img_w / cfg.image_size[1]
+    x2 *= img_w / cfg.image_size[1]
+    y1 *= img_h / cfg.image_size[0]
+    y2 *= img_h / cfg.image_size[0]
 
     # 終了
     crop_rect = [(x1,y1), (x1,y2), (x2,y2), (x2,y1)]
@@ -211,6 +223,9 @@ def homography_matrix( kp1, des1, kp2, des2 ):
     '''
     
     if kp1 is None or des1 is None or kp2 is None or des2 is None:
+        return None
+    
+    if len(kp1) < 5 or len(kp2) <5 :
         return None
     
     # k近傍法でマッチング(k=2)
@@ -499,9 +514,6 @@ def match_zoom( zoom_dif ):
     res = abs(zoom_dif) < TH_ZOOM
     return res
 
-# ダミーネットワーク
-class DummyNet:
-    pass
 
 if __name__ == '__main__':
     main()
