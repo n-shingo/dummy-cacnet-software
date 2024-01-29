@@ -91,7 +91,54 @@ class DrawTool:
         x, y = xy
         img.paste( icon_img, (int(x-mgn), int(y-mgn)), icon_mask)
     
-    
+    @staticmethod
+    def histgram( img, draw_img, xy, size, fw=1 ):
+        
+        '''
+        指定サイズでグレイスケールのヒストグラムを画像を作成
+        '''
+        
+        assert type(img) is np.ndarray
+        assert type(draw_img) is np.ndarray
+        
+        # 整数化
+        xy = ( int(xy[0]), int(xy[1]))  # 位置
+        size = ( int(size[0]), int(size[1]) ) # サイズ
+        fw = int(fw)  # 枠の太さ
+        
+        
+        # ヒストグラム値取得
+        img_h, img_w = img.shape[:2]
+        prcs_size = (int(img_w/4), int(img_h/4) )
+        prcs_img = cv2.resize( img, prcs_size )
+        prcs_img = cv2.cvtColor(prcs_img, cv2.COLOR_BGR2GRAY)
+        hist = cv2.calcHist( [prcs_img], [0], None, [256], [0,256])[:,0]
+        max_val = max(hist)
+        hist /= max_val
+        
+        # histgram画像
+        hist_w = 256
+        hist_img = np.zeros( (hist_w, 256), dtype='uint8')
+        for i in range(256):
+            length = int( hist[i] * hist_w )
+            cv2.line( hist_img, (i,hist_w), (i,hist_w-length), 255, thickness=1 )
+        
+        # リサイズ＆枠付き histgram
+        graph_size = (size[0]-2*fw, size[1]-2*fw)
+        resize_img = cv2.resize( hist_img, graph_size )
+        frame_hist_img = np.full( (size[1], size[0]), 255, dtype='uint8')
+        frame_hist_img[fw:size[1]-fw, fw:size[0]-fw] = resize_img
+        frame_hist_img = cv2.cvtColor(frame_hist_img, cv2.COLOR_GRAY2BGR)
+        
+        
+        # 貼り付け
+        x, y = xy
+        w, h = size
+        src_img = draw_img[y:y+h, x:x+w, :]
+        src_img = src_img * (1.0-frame_hist_img/255) + frame_hist_img * (frame_hist_img/255)
+        draw_img[y:y+h, x:x+w, :] = src_img.astype('uint8')
+        
+    @staticmethod
     def direct_gadget( img, xy, direct_dif, width, threshold ):
         
         '''

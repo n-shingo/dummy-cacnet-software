@@ -76,7 +76,8 @@ def main():
     flags = types.SimpleNamespace()
     flags.idle_sift = False # siftキーポイント表示
     flags.idle_info = False # 画像情報表示
-    flags.indicators = True # インジケータの表示
+    flags.adjust_indics = True # インジケータの表示
+    flags.rotation = 0
     
     # カメラキャプチャ作成
     cap = cv2.VideoCapture(CAM_ID, cv2.CAP_DSHOW)
@@ -118,11 +119,13 @@ def main():
         ret, frame = cap.read()
         
         # 表示用と処理用画像を作成
-        show_img, prcs_img = make_show_and_prc_images(frame)
+        show_img, prcs_img = make_show_and_prc_images(frame, flags.rotation)
         
+        # Idling時の処理
         if mode == 'idling':
             show_img = draw_idling_display( show_img, flags )
-            
+        
+        # Adjust時の処理
         elif mode == 'adjust':
         
             # sift特徴量取得
@@ -155,13 +158,20 @@ def main():
     
                 # SIFT
                 capt_kpts, capt_desc = SIFT.detectAndCompute(capt_img, None) # キャプチャ画像のSIFT特徴量
-                print( 'Feature key point size: ', capt_desc.shape )  # (キーポイント数 x 特徴量次元数)
+                print( 'SIFT key point size: ', capt_desc.shape )  # (キーポイント数 x 特徴量次元数)
                 
                 # adjust モードへ
                 mode = 'adjust'
                 
+            if key == ord('a'):
+                flags.idle_info = not flags.idle_info
+                
             if key == ord('s'):
                 flags.idle_sift = not flags.idle_sift
+                
+            if key == ord('r'):
+                flags.rotation += 90
+                flags.rotation %= 360
         
         # adjust モード時
         elif mode == 'adjust':
@@ -171,7 +181,7 @@ def main():
                 mode = 'idling'
                 
             if key == ord('i'):
-                flags.indicators = not flags.indicators
+                flags.adjust_indics = not flags.adjust_indics
         
     
     # 終了作業
@@ -182,11 +192,12 @@ def main():
 def get_cropping_rect( model, img ):
 
     if DUMMY:
+        img_h, img_w= img.shape[:2]
         rate = 0.6
-        x1 = PRCS_W * (1-rate)/2
-        x2 = PRCS_W * (1+rate)/2
-        y1 = PRCS_H * (1-rate)/2
-        y2 = PRCS_H * (1+rate)/2
+        x1 = img_w * (1-rate)/2
+        x2 = img_w * (1+rate)/2
+        y1 = img_h * (1-rate)/2
+        y2 = img_h * (1+rate)/2
 
     else:
         # CACNet
@@ -279,14 +290,19 @@ def draw_idling_display( img, flags ):
     '''
     
     # 横幅1920pixを基準としたscale
-    img_h, img_w= img.shape[:2]
+    draw_img = img.copy()
+    img_h, img_w= draw_img.shape[:2]
     
     # SIFTキーポイント描画
     if flags.idle_sift:
-        draw_sift(img)
+        draw_sift(draw_img)
+        
+    # 画像情報表示
+    if flags.idle_info:
+        draw_info(img, draw_img, flags.rotation)
 
     # PIL で描画    
-    pil_img = DrawTool.to_pil_image(img)
+    pil_img = DrawTool.to_pil_image(draw_img)
     
     # ヘッダ（背景, 警告マーク， テキスト）描画
     msg = '撮影したい方向にカメラを向けて Enter を押してください'
@@ -296,10 +312,8 @@ def draw_idling_display( img, flags ):
     draw_footer( pil_img, mode='idling' )
 
     # numpy 配列に戻す
-    cv2_img = DrawTool.to_cv2_image(pil_img)
+    return DrawTool.to_cv2_image(pil_img)
     
-    return cv2_img
-
 
 def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     
@@ -308,7 +322,8 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     '''
 
     # 画像サイズ
-    img_h, img_w = img.shape[:2]
+    draw_img = img.copy()
+    img_h, img_w = draw_img.shape[:2]
     
 
     # 諸々の値の計算
@@ -325,11 +340,14 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     if not h_matrix is None:
         
         # 処理用と表示用の比率
-        scale = img_h/PRCS_H
+        if flags.rotation % 180 == 0:
+            scale = img_h/PRCS_H
+        else:
+            scale = img_h/PRCS_W
         
         # ホモグラフィー変換する点群作成
         outer_rect = np.array( crop_rect )
-        center= (outer_rect[2]+outer_rect[0]) / 2
+        center = (outer_rect[0]+outer_rect[2]) / 2
         inner_rect = (outer_rect + center) / 2
         mid_pnts = [ (inner_rect[i]+inner_rect[(i+1)%4])/2 for i in range(4) ]
         pnts = np.concatenate( [outer_rect, inner_rect, mid_pnts, center.reshape(1,2) ], axis=0 )
@@ -368,7 +386,7 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
 
     # マッチしていないときは画面を暗めにする
     if not matched:
-        img = (img * 0.5).astype('uint8')
+        draw_img = (draw_img * 0.5).astype('uint8')
     
     # 中心矩形描画
     pt1 = (img_w // 4, img_h // 4)
@@ -377,29 +395,29 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     pt4 = (img_w * 3 // 4, img_h // 4 )
     ref_rect = ( pt1, pt2, pt3, pt4 )
     for i in range(4) :
-        cv2.line( img, ref_rect[i-1], ref_rect[i], (0,180,0), thickness=6, lineType=cv2.LINE_AA)
+        cv2.line( draw_img, ref_rect[i-1], ref_rect[i], (0,180,0), thickness=6, lineType=cv2.LINE_AA)
 
     # 外と内側枠線描画        
     if outer_rect is not None:
         color = (0,255,0) if matched else (0,0,255)
         for i in range(4):
-            cv2.line( img, outer_rect[i-1], outer_rect[i], (200,200,200), thickness=2, lineType=cv2.LINE_AA)
-            DrawTool.dashed_line( img, inner_rect[i-1], inner_rect[i], gap=8, linewidth=2, color=color)
+            cv2.line( draw_img, outer_rect[i-1], outer_rect[i], (200,200,200), thickness=2, lineType=cv2.LINE_AA)
+            DrawTool.dashed_line( draw_img, inner_rect[i-1], inner_rect[i], gap=8, linewidth=2, color=color)
          
     # インジケータ描画
-    if flags.indicators:
+    if flags.adjust_indics:
         ind_y = img_h - s*220
         ind_w = int(s*380)
         ind_x = img_w/2 - ind_w/2
-        DrawTool.direct_gadget(img, (ind_x-ind_w, ind_y), direct_dif, ind_w, TH_DIRECT )
-        DrawTool.angle_gadget(img, (ind_x, ind_y), angle_dif, ind_w, angle_matched)
-        DrawTool.zoom_gadget(img, (ind_x+ind_w, ind_y), zoom_dif, ind_w, zoom_matched )
-            
-    # ここから PIL Image で情報描画
+        DrawTool.direct_gadget(draw_img, (ind_x-ind_w, ind_y), direct_dif, ind_w, TH_DIRECT )
+        DrawTool.angle_gadget(draw_img, (ind_x, ind_y), angle_dif, ind_w, angle_matched)
+        DrawTool.zoom_gadget(draw_img, (ind_x+ind_w, ind_y), zoom_dif, ind_w, zoom_matched )
+
+
+    #### ここから PIL Image で情報描画
     
     # PIL で描画    
-    #pil_img = Image.fromarray(img[:, :, [2, 1, 0]]).convert('RGBA') # BGR->RGBA
-    pil_img = DrawTool.to_pil_image(img)
+    pil_img = DrawTool.to_pil_image(draw_img)
     
     # ヘッダ（背景, 警告マーク テキスト描画）
     msg = '緑の枠と赤い点線枠を重ねてください'
@@ -417,16 +435,72 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     draw_footer( pil_img, mode='adjust' )
 
     # cv2 画像に戻す
-    cv2_img = DrawTool.to_cv2_image(pil_img)
-
+    draw_img = DrawTool.to_cv2_image(pil_img)
+    
     # 終了
-    return cv2_img
+    return draw_img
 
 
 def draw_sift( img ):
+    # SIFTキーポイント表示
     sift = cv2.SIFT_create(contrastThreshold=0.18)  # 数を減らすために閾値大きめ
     kps, des = sift.detectAndCompute(img, None)
-    img[:] = cv2.drawKeypoints(img, kps, None, flags=4, color=(255,0,0))[:] # inplace で描画
+    img[:] = cv2.drawKeypoints(img, kps, None, flags=4, color=(0,255,0))[:] # inplace で描画
+
+
+def draw_info( org_img, draw_img, rot ):
+    
+    assert type(org_img) is np.ndarray
+    assert type(draw_img) is np.ndarray
+    
+    # 画像情報表示
+    img_h, img_w = draw_img.shape[:2]
+    
+    s = max(img_h, img_w) / 1920
+    x = 80 * s
+    y = img_h - 850 * s
+    w = 700 * s
+    h = 750 * s
+    font_size1 = 30
+    font_size2 = font_size1 * 0.9
+    dy = font_size1 * 1.1
+    dx = w * 0.4
+    mgnx = 20 * s
+    mgny = 20 * s
+    white = (255,255,255)
+    
+    x, y = int(x), int(y)
+    w, h = int(w), int(h)
+    
+    sub_img = draw_img[y:y+h, x:x+w, :]
+    sub_img = (sub_img * 0.5).astype('uint8')
+    
+    
+    # テキスト情報描画
+    sub_img = DrawTool.to_pil_image(sub_img)
+    DrawTool.text( sub_img, (w/2, mgny+0*dy), '画像情報', font_size1, white, anchor='ma')
+    DrawTool.text( sub_img, (mgnx, mgny+2*dy), 'hdmi画像', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+3*dy), '表示画像', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+4*dy), '処理画像', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+5*dy), '回転', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+6*dy*1.05), 'ヒストグラム(明度)', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+2*dy), '{0} x {1}'.format(HDMI_W, HDMI_H), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+3*dy), '{0} x {1}'.format(SHOW_W, SHOW_H), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+4*dy), '{0} x {1}'.format(PRCS_W, PRCS_H), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+5*dy), '{0} °'.format(rot), font_size2, white, anchor='la')
+    draw_img[y:y+h, x:x+w, :] = DrawTool.to_cv2_image(sub_img)
+    
+    # ヒストグラムの描画
+    hist_x = 3*mgnx + x
+    hist_y = y + 470 * s
+    hist_w = w-6*mgnx
+    hist_h = 260 * s
+    DrawTool.histgram( org_img, draw_img, (hist_x, hist_y), (hist_w, hist_h), fw=1 )
+    
+    # 終了
+    
+
+
     
 def draw_header( pil_img, msg, color ):
     img_w = pil_img.width
@@ -436,14 +510,14 @@ def draw_header( pil_img, msg, color ):
     DrawTool.text( pil_img, (s*90, s*0.01), msg , size=s*50, color=color )
 
 
-def draw_footer( img, mode ):
+def draw_footer( pil_img, mode ):
 
     # 横幅1920pixを基準としたscale
-    w, h= img.size
+    w, h= pil_img.size
     s = w/1920
 
     # 背景
-    DrawTool.fillrect( img, (0, h-s*50, w, h), fill=(0,0,0, 200) )
+    DrawTool.fillrect( pil_img, (0, h-s*50, w, h), fill=(0,0,0, 200) )
     
     # テキスト
     if mode == 'idling':
@@ -452,7 +526,7 @@ def draw_footer( img, mode ):
         text = "[Enter] Idling モード     [A] 調整アドバイス     [I] インジケータ     [M] マッチング情報     [C] CACNet-fix 情報    [ESC] 終了"
     else:
         text = 'mode "' + mode + '" is not defined.'
-    DrawTool.text( img, (w/2, h), text, size=s*30, color=(255,255,255), anchor='md')
+    DrawTool.text( pil_img, (w/2, h), text, size=s*30, color=(255,255,255), anchor='md')
     
     
 def cal_difference_direction( center, img_size ) :
@@ -500,12 +574,33 @@ def cal_difference_zoom( mid_pnts, img_width ) :
     return math.log(rate)
 
 
-def make_show_and_prc_images( hdmi_img ):
+def make_show_and_prc_images( hdmi_img, rotation=0 ):
     '''
     HDMIの生画像から、表示用と初利用の画像を生成する
     '''
+    # 切り出し
     shw_img = hdmi_img[:,HDMI_PAD:SHOW_W+HDMI_PAD]
-    prc_img = cv2.resize(shw_img, (PRCS_W, PRCS_H))
+    
+    # 回転
+    rotation %= 360
+    if rotation == 0:
+        pass
+    elif rotation == 90:
+        shw_img = cv2.rotate( shw_img, cv2.ROTATE_90_COUNTERCLOCKWISE )
+    elif rotation == 180:
+        shw_img = cv2.rotate( shw_img, cv2.ROTATE_180 )
+    elif rotation == 270:
+        shw_img = cv2.rotate( shw_img, cv2.ROTATE_90_CLOCKWISE )
+    else:
+        raise ValueError('Invalid rotation value {0}'.format(rotation))
+    
+    # 処理画像
+    if rotation % 180 == 0:
+        w, h = PRCS_W, PRCS_H
+    else:
+        w, h = PRCS_H, PRCS_W
+    prc_img = cv2.resize(shw_img, (w, h))
+
     return shw_img, prc_img
 
 
