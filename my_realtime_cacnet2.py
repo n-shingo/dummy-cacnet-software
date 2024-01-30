@@ -16,8 +16,14 @@ import numpy as np
 import torch
 from PIL import Image
 from cac_software_uitl import DrawTool
-if not DUMMY:
-    import torchvision.transforms as transforms
+import torchvision.transforms as transforms
+
+if DUMMY:
+    from random import randint
+    cfg = types.SimpleNamespace()
+    cfg.image_size = (224,224)
+    IMAGE_NET_MEAN, IMAGE_NET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+else:
     from config_classification import cfg
     from my_CACNet import MyCACNet
     from KUPCP_dataset import IMAGE_NET_MEAN, IMAGE_NET_STD
@@ -51,20 +57,19 @@ TH_ZOOM = 0.03
 
 
 # GPU or CPU
-GPU = True
+GPU = False
 if GPU:
     DEVICE = torch.device('cuda:0')
 else:
     DEVICE = torch.device('cpu')
 
 
-# CACNet 前処理
-if not DUMMY:
-    TRANS = transforms.Compose([
-        transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
-    ])
+# 入力画像の前処理
+TRANS = transforms.Compose([
+    transforms.Resize((cfg.image_size[0], cfg.image_size[1])),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=IMAGE_NET_MEAN, std=IMAGE_NET_STD)
+])
 
 # cv2.waitKey 用番号
 ENTER = 13
@@ -75,8 +80,10 @@ def main():
     # 表示用フラグ
     flags = types.SimpleNamespace()
     flags.idle_sift = False # siftキーポイント表示
-    flags.idle_info = False # 画像情報表示
+    flags.idle_imageinfo = False # 画像情報表示
     flags.adjust_indics = True # インジケータの表示
+    flags.adjust_cacinfo = False # CACNet 情報
+    flags.adjust_matching = False # マッチング情報
     flags.rotation = 0
     
     # カメラキャプチャ作成
@@ -132,10 +139,10 @@ def main():
             kp, des = SIFT.detectAndCompute( prcs_img, None )
             
             # キャプチャ画像から現在の画像に変換するホモグラフィ行列を求める
-            H = homography_matrix( capt_kpts, capt_desc, kp, des )
+            match_info = homography_matrix( capt_kpts, capt_desc, kp, des )
 
             # ディスプレイ描画
-            show_img = draw_adjust_display( show_img, crop_rect, H, flags )
+            show_img = draw_adjust_display( show_img, crop_rect, match_info, model.info, flags )
     
 
         # 画像表示        
@@ -164,7 +171,7 @@ def main():
                 mode = 'adjust'
                 
             if key == ord('a'):
-                flags.idle_info = not flags.idle_info
+                flags.idle_imageinfo = not flags.idle_imageinfo
                 
             if key == ord('s'):
                 flags.idle_sift = not flags.idle_sift
@@ -182,6 +189,12 @@ def main():
                 
             if key == ord('i'):
                 flags.adjust_indics = not flags.adjust_indics
+            
+            if key == ord('c'):
+                flags.adjust_cacinfo = not flags.adjust_cacinfo
+                
+            if key == ord('m'):
+                flags.adjust_matching = not flags.adjust_matching
         
     
     # 終了作業
@@ -191,37 +204,40 @@ def main():
 
 def get_cropping_rect( model, img ):
 
-    if DUMMY:
-        img_h, img_w= img.shape[:2]
-        rate = 0.6
-        x1 = img_w * (1-rate)/2
-        x2 = img_w * (1+rate)/2
-        y1 = img_h * (1-rate)/2
-        y2 = img_h * (1+rate)/2
+    # aspect比
+    img_h, img_w= img.shape[:2]
+    aspect = img_h / img_w
+    aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
+    aspect = torch.Tensor([[aspect]]).to(DEVICE)
 
-    else:
-        # CACNet
-        # aspect比
-        img_h, img_w= img.shape[:2]
-        aspect = img_h / img_w
-        aspect = aspect*img_w/img_h*cfg.image_size[0]/cfg.image_size[1]
-        aspect = torch.Tensor([[aspect]]).to(DEVICE)
+    # 入力用データに変換
+    input_image = Image.fromarray(img)
+    input_image = TRANS( input_image )
+    input_image = input_image.unsqueeze(dim=0).to(DEVICE)
+
+    # モデルに入力
+    logits, kcm, box = model(input_image , aspect )
+    
+    # 構図
+    comp_num = torch.argmax( logits[0]).item()
+    
+    # 切り出し領域の計算
+    box = box.detach().cpu()
+    x1, y1, x2, y2 = box[0].tolist()
+    x1 *= img_w / cfg.image_size[1]
+    x2 *= img_w / cfg.image_size[1]
+    y1 *= img_h / cfg.image_size[0]
+    y2 *= img_h / cfg.image_size[0]
         
-        # CACNet用入力データに変換
-        input_image = Image.fromarray(img)
-        input_image = TRANS( input_image )
-        input_image = input_image.unsqueeze(dim=0).to(DEVICE)
-        
-        # MyCACNet に入力
-        logits,kcm,box = model(input_image , aspect )
-        
-        # 切り出し領域の計算
-        box = box.detach().cpu()
-        x1, y1, x2, y2 = box[0].tolist()
-        x1 *= img_w / cfg.image_size[1]
-        x2 *= img_w / cfg.image_size[1]
-        y1 *= img_h / cfg.image_size[0]
-        y2 *= img_h / cfg.image_size[0]
+    # モデル情報付与
+    info = types.SimpleNamespace()
+    info.image_size = (img_w, img_h)
+    info.aspect = img_h / img_w
+    info.bonus_pos = model.bonus_pos
+    info.input_size = (cfg.image_size[1], cfg.image_size[0])
+    info.box = (x1, y1, x2, y2)
+    info.comp = composition_name(comp_num)
+    model.info = info
 
     # 終了
     crop_rect = [(x1,y1), (x1,y2), (x2,y2), (x2,y1)]
@@ -239,14 +255,21 @@ def homography_matrix( kp1, des1, kp2, des2 ):
     http://labs.eecs.tottori-u.ac.jp/sd/Member/oyamada/OpenCV/html/py_tutorials/py_feature2d/py_matcher/py_matcher.html
 
     '''
+    # マッチング情報
+    match_info = types.SimpleNamespace()
+    match_info.H = None
+    match_info.kpts_cnts = None
+    match_info.good_cnts = None
+    match_info.valid_cnts = None
     
     # キーポイントが取れていないときは終了
     if kp1 is None or des1 is None or kp2 is None or des2 is None:
-        return None
+        return match_info
     
     # キーポイントが少なすぎる場合は終了
-    if len(kp1) < 5 or len(kp2) <5 :
-        return None
+    match_info.kpts_cnts = ( len(kp1), len(kp2) )
+    if len(kp1) < 5 or len(kp2) < 5 :
+        return match_info
     
     # k近傍法でマッチング(k=2)
     matches = FLANN.knnMatch(des1, des2, k=2)
@@ -258,8 +281,9 @@ def homography_matrix( kp1, des1, kp2, des2 ):
             good_matches.append([m])
     
     # 十分な数がなければ失敗・終了
+    match_info.good_cnts = len(good_matches)
     if len(good_matches) < 12:
-        return None
+        return match_info
 
     # 対応するキーポイントのリスト作成
     kpts1 = np.float32(
@@ -269,18 +293,11 @@ def homography_matrix( kp1, des1, kp2, des2 ):
 
     # ホモグラフィを計算
     H, status = cv2.findHomography(kpts1, kpts2, cv2.RANSAC, 5.0)
-    cnt = np.count_nonzero(status)
-   
-    # マッチング情報
-    match_info = types.SimpleNamespace()
     match_info.H = H  # ホモグラフィ行列
-    match_info.kpts_cnts = ( len(kp1), len(kp2) )  # SIFTのキーポイント数
-    match_info.good_cnts = len(good_matches) # 良好なマッチング数
-    match_info.valid_cnts = cnt # RANZAC による有効なマッチング数
-
+    match_info.valid_cnts = np.count_nonzero(status)
     
     # 終了
-    return H
+    return match_info
 
 
 def draw_idling_display( img, flags ):
@@ -298,8 +315,8 @@ def draw_idling_display( img, flags ):
         draw_sift(draw_img)
         
     # 画像情報表示
-    if flags.idle_info:
-        draw_info(img, draw_img, flags.rotation)
+    if flags.idle_imageinfo:
+        draw_image_info(img, draw_img, flags.rotation)
 
     # PIL で描画    
     pil_img = DrawTool.to_pil_image(draw_img)
@@ -315,7 +332,7 @@ def draw_idling_display( img, flags ):
     return DrawTool.to_cv2_image(pil_img)
     
 
-def draw_adjust_display( img, crop_rect, h_matrix, flags ):
+def draw_adjust_display( img, crop_rect, match_info, model_info, flags ):
     
     '''
     Adjust モード時の描画
@@ -337,7 +354,7 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
     angle_dif = None
     zoom_dif = None
     
-    if not h_matrix is None:
+    if not match_info.H is None:
         
         # 処理用と表示用の比率
         if flags.rotation % 180 == 0:
@@ -354,7 +371,7 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
         
         # 変換
         pnts = pnts.reshape( 1,-1, 2 )
-        pnts = cv2.perspectiveTransform( pnts, h_matrix )
+        pnts = cv2.perspectiveTransform( pnts, match_info.H )
         pnts = pnts.squeeze(0)
         pnts = pnts * scale
         
@@ -403,6 +420,7 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
         for i in range(4):
             cv2.line( draw_img, outer_rect[i-1], outer_rect[i], (200,200,200), thickness=2, lineType=cv2.LINE_AA)
             DrawTool.dashed_line( draw_img, inner_rect[i-1], inner_rect[i], gap=8, linewidth=2, color=color)
+
          
     # インジケータ描画
     if flags.adjust_indics:
@@ -412,7 +430,14 @@ def draw_adjust_display( img, crop_rect, h_matrix, flags ):
         DrawTool.direct_gadget(draw_img, (ind_x-ind_w, ind_y), direct_dif, ind_w, TH_DIRECT )
         DrawTool.angle_gadget(draw_img, (ind_x, ind_y), angle_dif, ind_w, angle_matched)
         DrawTool.zoom_gadget(draw_img, (ind_x+ind_w, ind_y), zoom_dif, ind_w, zoom_matched )
+        
+    # CACNet情報描画
+    if flags.adjust_cacinfo:
+        draw_cac_info( draw_img, model_info )
 
+    # マッチング情報描画
+    if flags.adjust_matching:
+        draw_match_info( draw_img, match_info )
 
     #### ここから PIL Image で情報描画
     
@@ -448,7 +473,11 @@ def draw_sift( img ):
     img[:] = cv2.drawKeypoints(img, kps, None, flags=4, color=(0,255,0))[:] # inplace で描画
 
 
-def draw_info( org_img, draw_img, rot ):
+def draw_image_info( org_img, draw_img, rot ):
+    
+    '''
+    Idlingモードで画像情報を描画
+    '''
     
     assert type(org_img) is np.ndarray
     assert type(draw_img) is np.ndarray
@@ -459,10 +488,11 @@ def draw_info( org_img, draw_img, rot ):
     s = max(img_h, img_w) / 1920
     x = 80 * s
     y = img_h - 850 * s
-    w = 700 * s
-    h = 750 * s
-    font_size1 = 30
+    w = 400 * s
+    h = 540 * s
+    font_size1 = 30 * s
     font_size2 = font_size1 * 0.9
+    font_size3 = font_size2 * 1
     dy = font_size1 * 1.1
     dx = w * 0.4
     mgnx = 20 * s
@@ -473,17 +503,17 @@ def draw_info( org_img, draw_img, rot ):
     w, h = int(w), int(h)
     
     sub_img = draw_img[y:y+h, x:x+w, :]
-    sub_img = (sub_img * 0.5).astype('uint8')
+    sub_img = (sub_img * 0.3).astype('uint8')
     
     
     # テキスト情報描画
     sub_img = DrawTool.to_pil_image(sub_img)
-    DrawTool.text( sub_img, (w/2, mgny+0*dy), '画像情報', font_size1, white, anchor='ma')
+    DrawTool.text( sub_img, (w/2, mgny+0*dy), '[A] 画像情報', font_size1, white, anchor='ma')
     DrawTool.text( sub_img, (mgnx, mgny+2*dy), 'hdmi画像', font_size2, white, anchor='la')
     DrawTool.text( sub_img, (mgnx, mgny+3*dy), '表示画像', font_size2, white, anchor='la')
     DrawTool.text( sub_img, (mgnx, mgny+4*dy), '処理画像', font_size2, white, anchor='la')
     DrawTool.text( sub_img, (mgnx, mgny+5*dy), '回転', font_size2, white, anchor='la')
-    DrawTool.text( sub_img, (mgnx, mgny+6*dy*1.05), 'ヒストグラム(明度)', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+7*dy), 'ヒストグラム(明度)', font_size3, white, anchor='la')
     DrawTool.text( sub_img, (mgnx+dx, mgny+2*dy), '{0} x {1}'.format(HDMI_W, HDMI_H), font_size2, white, anchor='la')
     DrawTool.text( sub_img, (mgnx+dx, mgny+3*dy), '{0} x {1}'.format(SHOW_W, SHOW_H), font_size2, white, anchor='la')
     DrawTool.text( sub_img, (mgnx+dx, mgny+4*dy), '{0} x {1}'.format(PRCS_W, PRCS_H), font_size2, white, anchor='la')
@@ -491,15 +521,106 @@ def draw_info( org_img, draw_img, rot ):
     draw_img[y:y+h, x:x+w, :] = DrawTool.to_cv2_image(sub_img)
     
     # ヒストグラムの描画
-    hist_x = 3*mgnx + x
-    hist_y = y + 470 * s
-    hist_w = w-6*mgnx
-    hist_h = 260 * s
+    hist_x = 2*mgnx + x
+    hist_y = y + 300 * s
+    hist_w = w-4*mgnx
+    hist_h = 220 * s
     DrawTool.histgram( org_img, draw_img, (hist_x, hist_y), (hist_w, hist_h), fw=1 )
     
     # 終了
-    
 
+def draw_cac_info( draw_img, model_info ):
+    
+    assert type(draw_img) is np.ndarray
+
+    '''
+    Adjust モードで CACNetの情報を描画
+    '''
+    img_h, img_w = draw_img.shape[:2]
+    s = max(img_h, img_w) / 1920
+    w = 500 * s
+    h = 300 * s
+    x = img_w - w - 50*s
+    y = 200 * s
+    font_size1 = 30 * s
+    font_size2 = font_size1 * 0.9
+    dy = font_size1 * 1.1
+    dx = w * 0.4
+    mgnx = 20 * s
+    mgny = 20 * s
+    white = (255,255,255)
+
+    x, y = int(x), int(y)
+    w, h = int(w), int(h)
+    
+    
+    # CACNet情報
+    org_w, org_h = model_info.image_size
+    in_w, in_h = model_info.input_size
+    bonus_pos = model_info.bonus_pos
+    aspect = model_info.aspect
+    box = [ int(v) for v in model_info.box ]
+    box_str = '({0}, {1}, {2}, {3})'.format( box[0], box[1], box[2], box[3] )
+    comp_str = model_info.comp
+    
+    sub_img = draw_img[y:y+h, x:x+w, :]
+    DrawTool.translucent_rect( sub_img, 0, 0, w, h, (0,0,0) )
+    sub_img = DrawTool.to_pil_image(sub_img)
+    DrawTool.text( sub_img, (w/2, mgny+0*dy), '[C] CACNet-fix 情報', font_size1, white, anchor='ma')
+    DrawTool.text( sub_img, (mgnx, mgny+2*dy), '原画像', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+3*dy), '入力画像', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+4*dy), '縦横比(H/W)', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+5*dy), 'ボーナス位置', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+6*dy), '切り出し座標', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+7*dy), '構図', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+2*dy), '{0} x {1}'.format(org_w, org_h), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+3*dy), '{0} x {1}'.format(in_w, in_h), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+4*dy), '{0:.2f}'.format(aspect), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+5*dy), str(bonus_pos), font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+6*dy), box_str, font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+7*dy), comp_str, font_size2, white, anchor='la')
+    draw_img[y:y+h, x:x+w, :] = DrawTool.to_cv2_image(sub_img)
+    
+    
+def draw_match_info( draw_img, match_info ):
+    '''
+    Adjust モードで マッチング情報を描画
+    '''
+    img_h, img_w = draw_img.shape[:2]
+    s = max(img_h, img_w) / 1920
+    w = 500 * s
+    h = 200 * s
+    x = img_w - w - 50*s
+    y = 600 * s
+    font_size1 = 30 * s
+    font_size2 = font_size1 * 0.9
+    dy = font_size1 * 1.1
+    dx = w * 0.5
+    mgnx = 20 * s
+    mgny = 20 * s
+    white = (255,255,255)
+
+    x, y = int(x), int(y)
+    w, h = int(w), int(h)
+    
+    
+    sub_img = draw_img[y:y+h, x:x+w, :]
+    DrawTool.translucent_rect( sub_img, 0, 0, w, h, (0,0,0) )
+    sub_img = DrawTool.to_pil_image(sub_img)
+    DrawTool.text( sub_img, (w/2, mgny+0*dy), '[M] マッチング情報', font_size1, white, anchor='ma')
+    DrawTool.text( sub_img, (mgnx, mgny+2*dy), 'キーポイント数', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+3*dy), '良好マッチング数', font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx, mgny+4*dy), '有効マッチング数', font_size2, white, anchor='la')
+    
+    key_pnts_str = 'None' if match_info.kpts_cnts is None else '{0}'.format(match_info.kpts_cnts)
+    good_cnts_str = 'None' if match_info.good_cnts is None else str(match_info.good_cnts)
+    valid_cnts_str = 'None' if match_info.valid_cnts is None else str(match_info.valid_cnts)
+    
+    DrawTool.text( sub_img, (mgnx+dx, mgny+2*dy), key_pnts_str, font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+3*dy), good_cnts_str, font_size2, white, anchor='la')
+    DrawTool.text( sub_img, (mgnx+dx, mgny+4*dy), valid_cnts_str, font_size2, white, anchor='la')
+    draw_img[y:y+h, x:x+w, :] = DrawTool.to_cv2_image(sub_img)
+    
 
     
 def draw_header( pil_img, msg, color ):
@@ -618,9 +739,59 @@ def match_zoom( zoom_dif ):
     res = abs(zoom_dif) < TH_ZOOM
     return res
 
-# ダミーネットワーク
+def composition_name( num ):
+    if num == 0:
+        return 'Rule of Thirds (RoT)'
+    elif num == 1:
+        return 'Vertical'
+    elif num == 2:
+        return 'Horizontal'
+    elif num == 3:
+        return 'Diagonal'
+    elif num == 4:
+        return 'Curved'
+    elif num == 5:
+        return 'Triangle'
+    elif num == 6:
+        return 'Center'
+    elif num == 7:
+        return 'Symmetric'
+    elif num == 8:
+        return 'Pattern'
+    else:
+        return 'Invalid Copposition'
+
+
+# デバッグ用のダミーネットワーク
 class DummyNet:
-    pass
+    
+    def __init__(self, bonus_pos=1):
+        self.bonus_pos = bonus_pos
+        
+    def __call__(self, img, aspect ):
+        
+        # batch size
+        bt_size = img.shape[0]
+
+        # dummy logits
+        logits = torch.zeros( size=(bt_size, 9) )
+        for lg in logits:
+            lg[ randint(0,8)] = 1.0
+        logits = logits.to(DEVICE)
+        
+        # dummy box
+        rate = 0.6
+        x1 = cfg.image_size[1] * (1-rate)/2
+        x2 = cfg.image_size[1] * (1+rate)/2
+        y1 = cfg.image_size[0] * (1-rate)/2
+        y2 = cfg.image_size[0] * (1+rate)/2
+        one_box = torch.Tensor([ x1, y1, x2, y2 ])
+        box = one_box.repeat( (bt_size, 1) ).to(DEVICE)
+        
+        # dummy kcm
+        kcm = None
+
+        return logits, kcm, box
 
 if __name__ == '__main__':
     main()

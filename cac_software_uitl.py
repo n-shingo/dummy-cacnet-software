@@ -432,6 +432,10 @@ class DrawTool:
         '''
          半透明な矩形を描く
         '''
+        
+        x, y = int(x), int(y)
+        w, h = int(w), int(h)
+        
         sub_img = img[y:y+h, x:x+w]
         blank = np.zeros((h, w, 3), dtype='uint8' )
         blank += np.array(color, dtype='uint8')
@@ -528,3 +532,16 @@ class DrawTool:
     @staticmethod
     def to_cv2_image( pil_img: Image ):
         return np.array(pil_img)[:, :, [2, 1, 0]]
+    
+
+class AdviceDrawer:
+    def __init__( self ):
+        self.new_color = (0,200,0)
+        self.old_color = (200, 200, 200)
+        self.update_interval = 2000.0
+        self.animation_time = 500.0
+        self.newlist = []
+        self.oldlist = []
+        
+    def set_string(self, new_str ):
+        pass
